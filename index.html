@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TrueParallax Window Demo</title>
+    <link rel="stylesheet" href="style.css" />
+    <!-- Three.js -->
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+          "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+          "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.9/+esm"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="container"></div>
+    <video id="webcam" autoplay playsinline></video>
+    <div id="debug-info">
+      <p>Head Position: <span id="head-pos">Waiting...</span></p>
+      <p>Cube Position: <span id="cube-pos">--, --, --</span></p>
+      <p>Cube Size: <span id="cube-scale">--, --, --</span></p>
+      <p>Cube Rotation: <span id="cube-rot">--°, --°, --°</span></p>
+      <p>Child Cube Position: <span id="child-cube-pos">--, --, --</span></p>
+      <p>Child Cube Size: <span id="child-cube-scale">--, --, --</span></p>
+      <p>Child Cube Rotation: <span id="child-cube-rot">--°, --°, --°</span></p>
+    </div>
+    <div id="controls">
+      <label for="z-size-slider"
+        >Depth (Z): <span id="z-size-value">100.00</span></label
+      >
+      <input
+        id="z-size-slider"
+        type="range"
+        min="0.2"
+        max="100"
+        step="0.01"
+        value="100"
+      />
+      <button id="add-child-btn">Add Child Cube</button>
+      <span id="child-count">Children: 1</span>
+    </div>
+
+    <script type="module" src="script.js"></script>
+  </body>
+</html>
