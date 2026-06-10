@@ -101,7 +101,7 @@ function setupThreeJS() {
     pointLight.position.set(0, 5, 5);
     scene.add(pointLight);
 
-    const roomGeometry = new THREE.BoxGeometry(30, 20, 100);
+    const roomGeometry = new THREE.BoxGeometry(40, 30, 100);
     const roomMaterial = new THREE.MeshPhysicalMaterial({
         color: 0x222222,
         side: THREE.BackSide, // Render inside of the box
@@ -311,7 +311,7 @@ async function setupMediaPipe() {
     faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
         baseOptions: {
             modelAssetPath: `https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task`,
-            delegate: "GPU"
+            delegate: IS_MOBILE ? "CPU" : "GPU"
         },
         outputFaceBlendshapes: false,
         runningMode: "VIDEO",
@@ -341,6 +341,8 @@ function updateChildCountUI() {
 
 async function setupWebcam() {
     video = document.getElementById('webcam');
+    video.muted = true;
+    video.playsInline = true;
     const stream = await navigator.mediaDevices.getUserMedia({
         video: {
             width: { ideal: VIDEO_WIDTH },
@@ -353,7 +355,7 @@ async function setupWebcam() {
     video.srcObject = stream;
     return new Promise((resolve) => {
         video.onloadedmetadata = () => {
-            resolve();
+            video.play().then(resolve).catch(resolve);
         };
     });
 }
