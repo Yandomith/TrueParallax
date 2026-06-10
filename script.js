@@ -3,7 +3,10 @@ import { FilesetResolver, FaceLandmarker } from '@mediapipe/tasks-vision';
 import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
 
 // --- Configuration ---
-const IS_MOBILE = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+const IS_MOBILE =
+    /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1) ||
+    window.matchMedia('(pointer: coarse)').matches;
 const VIDEO_WIDTH = IS_MOBILE ? 320 : 640;
 const VIDEO_HEIGHT = IS_MOBILE ? 240 : 480;
 const PARALLAX_FACTOR = 0.8; // Sensitivity of the effect
@@ -21,8 +24,13 @@ const DEBUG_UI_INTERVAL_MS = IS_MOBILE ? 250 : 100;
 let scene, camera, renderer;
 let faceLandmarker;
 let lastVideoTime = -1;
+let lastPresentedFrameCount = -1;
 let lastFaceDetectionTime = 0;
 let lastDebugUpdateTime = 0;
+let webcamReady = false;
+let faceModelReady = false;
+let faceDetectionTimer = null;
+let videoFrameCallbackActive = false;
 let video;
 let cube;
 let pivotDot;
@@ -317,6 +325,8 @@ async function setupMediaPipe() {
         runningMode: "VIDEO",
         numFaces: 1
     });
+    faceModelReady = true;
+    maybeStartFaceTrackingLoop();
 }
 
 // Initialize child controls (button to add more children)
@@ -355,27 +365,74 @@ async function setupWebcam() {
     video.srcObject = stream;
     return new Promise((resolve) => {
         video.onloadedmetadata = () => {
-            video.play().then(resolve).catch(resolve);
+            video.play().then(() => {
+                webcamReady = true;
+                maybeStartFaceTrackingLoop();
+                resolve();
+            }).catch((error) => {
+                console.warn('Video play failed:', error);
+                webcamReady = true;
+                maybeStartFaceTrackingLoop();
+                resolve();
+            });
         };
     });
+}
+
+function maybeStartFaceTrackingLoop() {
+    if (!webcamReady || !faceModelReady || videoFrameCallbackActive) return;
+    videoFrameCallbackActive = true;
+
+    if (video && typeof video.requestVideoFrameCallback === 'function') {
+        const onVideoFrame = (now, metadata) => {
+            if (video && !video.paused && !video.ended && faceLandmarker) {
+                const presentedFrames = metadata && typeof metadata.presentedFrames === 'number'
+                    ? metadata.presentedFrames
+                    : -1;
+                const timestamp = metadata && typeof metadata.mediaTime === 'number'
+                    ? metadata.mediaTime * 1000
+                    : now;
+                processFaceFrame(timestamp, presentedFrames);
+            }
+
+            if (video && !video.ended) {
+                video.requestVideoFrameCallback(onVideoFrame);
+            }
+        };
+
+        video.requestVideoFrameCallback(onVideoFrame);
+        return;
+    }
+
+    faceDetectionTimer = window.setInterval(() => {
+        if (video && !video.paused && !video.ended && faceLandmarker) {
+            processFaceFrame(performance.now(), video.currentTime);
+        }
+    }, FACE_DETECTION_INTERVAL_MS);
+}
+
+function processFaceFrame(timestamp, frameKey = -1) {
+    if (!faceLandmarker || !video) return;
+    if (frameKey >= 0) {
+        if (frameKey === lastPresentedFrameCount) return;
+        lastPresentedFrameCount = frameKey;
+    } else if (video.currentTime === lastVideoTime) {
+        return;
+    }
+
+    lastVideoTime = video.currentTime;
+    lastFaceDetectionTime = timestamp;
+    const results = faceLandmarker.detectForVideo(video, timestamp);
+
+    if (results.faceLandmarks && results.faceLandmarks.length > 0) {
+        const landmarks = results.faceLandmarks[ 0 ];
+        updateHeadPosition(landmarks);
+    }
 }
 
 // --- Main Loop ---
 function animate() {
     requestAnimationFrame(animate);
-
-    // Process Webcam
-    const now = performance.now();
-    if (faceLandmarker && video && video.currentTime !== lastVideoTime && (now - lastFaceDetectionTime) >= FACE_DETECTION_INTERVAL_MS) {
-        lastVideoTime = video.currentTime;
-        lastFaceDetectionTime = now;
-        const results = faceLandmarker.detectForVideo(video, now);
-
-        if (results.faceLandmarks && results.faceLandmarks.length > 0) {
-            const landmarks = results.faceLandmarks[ 0 ];
-            updateHeadPosition(landmarks);
-        }
-    }
 
     // Render
     // Smoothly move camera toward target (for gizmo navigation)
