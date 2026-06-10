@@ -18,6 +18,7 @@
   </head>
   <body>
     <div id="container"></div>
+
     <video id="webcam" autoplay playsinline></video>
     <div id="debug-info">
       <p>Head Position: <span id="head-pos">Waiting...</span></p>
@@ -27,6 +28,11 @@
       <p>Child Cube Position: <span id="child-cube-pos">--, --, --</span></p>
       <p>Child Cube Size: <span id="child-cube-scale">--, --, --</span></p>
       <p>Child Cube Rotation: <span id="child-cube-rot">--°, --°, --°</span></p>
+      <h1>TrueParallax Window Demo</h1>
+      <h3>
+        Move your head to see the parallax effect in action! Better Use PC or
+        Laptop
+      </h3>
     </div>
     <div id="controls">
       <label for="z-size-slider"
@@ -40,7 +46,7 @@
         step="0.01"
         value="100"
       />
-      <button id="add-child-btn">Add Child Cube</button>
+      <!-- <button id="add-child-btn">Add Child Cube</button> -->
       <span id="child-count">Children: 1</span>
     </div>
 
