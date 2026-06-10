@@ -1,9 +1,11 @@
 import * as THREE from 'three';
 import { FilesetResolver, FaceLandmarker } from '@mediapipe/tasks-vision';
+import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
 
 // --- Configuration ---
-const VIDEO_WIDTH = 640;
-const VIDEO_HEIGHT = 480;
+const IS_MOBILE = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+const VIDEO_WIDTH = IS_MOBILE ? 320 : 640;
+const VIDEO_HEIGHT = IS_MOBILE ? 240 : 480;
 const PARALLAX_FACTOR = 0.8; // Sensitivity of the effect
 const DEPTH_MULTIPLIER = 0.05; // How strongly distance amplifies parallax
 // Base max rotation (radians) when cube scale.z === 1. At `scale.z === 1`
@@ -11,11 +13,16 @@ const DEPTH_MULTIPLIER = 0.05; // How strongly distance amplifies parallax
 // with the cube's Z size (e.g., scale.z === 100 -> +/-1000 degrees).
 const BASE_MAX_ANCHOR_ROTATION = THREE.MathUtils.degToRad(10);
 const HEAD_ROTATION_FACTOR = THREE.MathUtils.degToRad(30);
+const MAX_PIXEL_RATIO = IS_MOBILE ? 1 : 1.5;
+const FACE_DETECTION_INTERVAL_MS = IS_MOBILE ? 100 : 66;
+const DEBUG_UI_INTERVAL_MS = IS_MOBILE ? 250 : 100;
 
 // --- Globals ---
 let scene, camera, renderer;
 let faceLandmarker;
 let lastVideoTime = -1;
+let lastFaceDetectionTime = 0;
+let lastDebugUpdateTime = 0;
 let video;
 let cube;
 let pivotDot;
@@ -27,22 +34,44 @@ const CHILD_GEO_SIZE = 1;
 let targetCameraPos;
 let headRotationTarget = new THREE.Vector2(0, 0);
 const CAMERA_LERP = 0.15;
+const scratchWorldPos = new THREE.Vector3();
+const scratchWorldQuat = new THREE.Quaternion();
+const scratchWorldEuler = new THREE.Euler();
+const scratchChildWorldPos = new THREE.Vector3();
+const scratchChildWorldScale = new THREE.Vector3();
+const scratchChildWorldQuat = new THREE.Quaternion();
+const scratchChildWorldEuler = new THREE.Euler();
+const CAMERA_OPTIONS = {
+    antialias: !IS_MOBILE,
+    alpha: false,
+    powerPreference: 'high-performance',
+    precision: IS_MOBILE ? 'mediump' : 'highp'
+};
 
 // --- Initialization ---
 async function init() {
     // 1. Setup Three.js
     setupThreeJS();
 
-    // 2. Setup MediaPipe
-    await setupMediaPipe();
+    // Start rendering immediately while the heavier resources load in the background.
+    animate();
 
-    // 3. Setup Webcam
-    await setupWebcam();
+    // 1b. Load HDRI environment lighting without blocking first paint.
+    void setupHDRI().catch((error) => {
+        console.warn('HDRI load failed:', error);
+    });
+
+    // 2. Setup MediaPipe in the background.
+    void setupMediaPipe().catch((error) => {
+        console.warn('MediaPipe setup failed:', error);
+    });
+
+    // 3. Setup Webcam in the background.
+    void setupWebcam().catch((error) => {
+        console.warn('Webcam setup failed:', error);
+    });
 
     // navigation gizmo removed
-
-    // 4. Start Loop
-    animate();
 }
 
 function setupThreeJS() {
@@ -59,9 +88,9 @@ function setupThreeJS() {
     targetCameraPos = camera.position.clone();
 
     // Renderer
-    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer = new THREE.WebGLRenderer(CAMERA_OPTIONS);
     renderer.setSize(window.innerWidth, window.innerHeight);
-    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, MAX_PIXEL_RATIO));
     container.appendChild(renderer.domElement);
 
     // Lighting
@@ -72,20 +101,17 @@ function setupThreeJS() {
     pointLight.position.set(0, 5, 5);
     scene.add(pointLight);
 
-    const roomGeometry = new THREE.BoxGeometry(200, 100, 200);
-    const roomMaterial = new THREE.MeshStandardMaterial({
+    const roomGeometry = new THREE.BoxGeometry(30, 20, 100);
+    const roomMaterial = new THREE.MeshPhysicalMaterial({
         color: 0x222222,
         side: THREE.BackSide, // Render inside of the box
         roughness: 0.5,
-        metalness: 0.1
+        metalness: 0.1,
+        clearcoat: 0.0,
+        reflectivity: 0.5
     });
     const room = new THREE.Mesh(roomGeometry, roomMaterial);
     scene.add(room);
-
-    // Grid helper for floor
-    const gridHelper = new THREE.GridHelper(20, 20, 0x00ff00, 0x444444);
-    gridHelper.position.y = -5;
-    scene.add(gridHelper);
 
     // --- Floating Object ---
     const cubeGeometry = new THREE.BoxGeometry(1, 1, 1);
@@ -94,16 +120,15 @@ function setupThreeJS() {
     cubeAnchor.position.set(0, 0, 0);
     scene.add(cubeAnchor);
 
-    // Give each face a distinct color and render both sides so faces are
     // visible from inside/outside. Keep the pivot-facing face transparent.
     const cubeMaterials = [
-        new THREE.MeshStandardMaterial({ color: 0xff3355, side: THREE.DoubleSide }), // +X
-        new THREE.MeshStandardMaterial({ color: 0xff8888, side: THREE.DoubleSide }), // -X
-        new THREE.MeshStandardMaterial({ color: 0xff22aa, side: THREE.DoubleSide }), // +Y
-        new THREE.MeshStandardMaterial({ color: 0x33ccff, side: THREE.DoubleSide }), // -Y
+        new THREE.MeshPhysicalMaterial({ color: 0xff3355, side: THREE.DoubleSide, roughness: 0.4, metalness: 0.05 }), // +X
+        new THREE.MeshPhysicalMaterial({ color: 0xff8888, side: THREE.DoubleSide, roughness: 0.4, metalness: 0.05 }), // -X
+        new THREE.MeshPhysicalMaterial({ color: 0xff22aa, side: THREE.DoubleSide, roughness: 0.4, metalness: 0.05 }), // +Y
+        new THREE.MeshPhysicalMaterial({ color: 0x33ccff, side: THREE.DoubleSide, roughness: 0.4, metalness: 0.05 }), // -Y
         // Hide the face that sits on the pivot side.
-        new THREE.MeshStandardMaterial({ color: 0x3333ff, transparent: true, opacity: 0, side: THREE.DoubleSide }), // +Z (pivot-facing)
-        new THREE.MeshStandardMaterial({ color: 0xffcc33, side: THREE.DoubleSide })  // -Z
+        new THREE.MeshPhysicalMaterial({ color: 0x3333ff, transparent: true, opacity: 0, side: THREE.DoubleSide }), // +Z (pivot-facing)
+        new THREE.MeshPhysicalMaterial({ color: 0xffcc33, side: THREE.DoubleSide, roughness: 0.35, metalness: 0.05 })  // -Z
     ];
 
     cube = new THREE.Mesh(cubeGeometry, cubeMaterials);
@@ -135,6 +160,27 @@ function setupThreeJS() {
     fitCubeToScreen();
 }
 
+async function setupHDRI() {
+    if (!renderer || !scene) return;
+
+    const loader = new RGBELoader();
+    const hdrTexture = await loader.loadAsync(
+        new URL('./golden_gate_hills_1k.hdr', import.meta.url).href
+    );
+
+    hdrTexture.mapping = THREE.EquirectangularReflectionMapping;
+
+    const pmremGenerator = new THREE.PMREMGenerator(renderer);
+    pmremGenerator.compileEquirectangularShader();
+
+    const envMap = pmremGenerator.fromEquirectangular(hdrTexture).texture;
+    scene.environment = envMap;
+    scene.background = new THREE.Color(0x111111);
+
+    hdrTexture.dispose();
+    pmremGenerator.dispose();
+}
+
 function onWindowResize() {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
@@ -164,6 +210,7 @@ function fitCubeToScreen() {
     cube.scale.y = visibleHeight;
     // Do not modify cube.position — keep center at origin
     cube.userData.initialPos.z = cube.position.z;
+    neutralizeChildScale();
 }
 
 // Create a small child cube attached to `cube` at the top-left-front in local
@@ -171,7 +218,7 @@ function fitCubeToScreen() {
 function createChildCube(pos = new THREE.Vector3(0, 0, 0)) {
     if (!cube) return;
     const childGeo = new THREE.BoxGeometry(CHILD_GEO_SIZE, CHILD_GEO_SIZE, CHILD_GEO_SIZE);
-    const childMat = new THREE.MeshStandardMaterial({ color: 0x00ff00, side: THREE.DoubleSide });
+    const childMat = new THREE.MeshPhysicalMaterial({ color: 0x00ff00, side: THREE.DoubleSide, roughness: 0.4, metalness: 0.05 });
     const mesh = new THREE.Mesh(childGeo, childMat);
     // Place the child inside the parent cube (local coordinates).
     mesh.position.copy(pos);
@@ -197,6 +244,7 @@ function initZSlider() {
         // Keep scaling centered at origin (no position change)
         cube.userData.initialPos.z = cube.position.z;
         zValueDisplay.innerText = v.toFixed(2);
+        neutralizeChildScale();
     });
 }
 
@@ -216,6 +264,10 @@ function neutralizeChildScale() {
 // Update the on-screen debug readouts for cube and child transforms.
 function updateDebugUI() {
     try {
+        const now = performance.now();
+        if (now - lastDebugUpdateTime < DEBUG_UI_INTERVAL_MS) return;
+        lastDebugUpdateTime = now;
+
         const cubePosEl = document.getElementById('cube-pos');
         const cubeScaleEl = document.getElementById('cube-scale');
         const cubeRotEl = document.getElementById('cube-rot');
@@ -223,33 +275,28 @@ function updateDebugUI() {
         const childScaleEl = document.getElementById('child-cube-scale');
         const childRotEl = document.getElementById('child-cube-rot');
         if (cube) {
-            const worldPos = new THREE.Vector3();
-            cube.getWorldPosition(worldPos);
+            cube.getWorldPosition(scratchWorldPos);
             const s = cube.scale;
-            const worldQuat = new THREE.Quaternion();
-            cube.getWorldQuaternion(worldQuat);
-            const worldEuler = new THREE.Euler().setFromQuaternion(worldQuat, 'XYZ');
+            cube.getWorldQuaternion(scratchWorldQuat);
+            scratchWorldEuler.setFromQuaternion(scratchWorldQuat, 'XYZ');
 
-            if (cubePosEl) cubePosEl.innerText = `${worldPos.x.toFixed(2)}, ${worldPos.y.toFixed(2)}, ${worldPos.z.toFixed(2)}`;
+            if (cubePosEl) cubePosEl.innerText = `${scratchWorldPos.x.toFixed(2)}, ${scratchWorldPos.y.toFixed(2)}, ${scratchWorldPos.z.toFixed(2)}`;
             if (cubeScaleEl) cubeScaleEl.innerText = `${s.x.toFixed(2)}, ${s.y.toFixed(2)}, ${s.z.toFixed(2)}`;
-            if (cubeRotEl) cubeRotEl.innerText = `${THREE.MathUtils.radToDeg(worldEuler.x).toFixed(1)}°, ${THREE.MathUtils.radToDeg(worldEuler.y).toFixed(1)}°, ${THREE.MathUtils.radToDeg(worldEuler.z).toFixed(1)}°`;
+            if (cubeRotEl) cubeRotEl.innerText = `${THREE.MathUtils.radToDeg(scratchWorldEuler.x).toFixed(1)}°, ${THREE.MathUtils.radToDeg(scratchWorldEuler.y).toFixed(1)}°, ${THREE.MathUtils.radToDeg(scratchWorldEuler.z).toFixed(1)}°`;
 
             // Show info for the first child (if any) and the total count.
             const countEl = document.getElementById('child-count');
             if (countEl) countEl.innerText = `Children: ${childCubes.length}`;
             const first = childCubes.length > 0 ? childCubes[ 0 ] : null;
             if (first) {
-                const childWorldPos = new THREE.Vector3();
-                first.getWorldPosition(childWorldPos);
-                const childWorldScale = new THREE.Vector3();
-                first.getWorldScale(childWorldScale);
-                const childWorldQuat = new THREE.Quaternion();
-                first.getWorldQuaternion(childWorldQuat);
-                const childWorldEuler = new THREE.Euler().setFromQuaternion(childWorldQuat, 'XYZ');
+                first.getWorldPosition(scratchChildWorldPos);
+                first.getWorldScale(scratchChildWorldScale);
+                first.getWorldQuaternion(scratchChildWorldQuat);
+                scratchChildWorldEuler.setFromQuaternion(scratchChildWorldQuat, 'XYZ');
 
-                if (childPosEl) childPosEl.innerText = `${childWorldPos.x.toFixed(2)}, ${childWorldPos.y.toFixed(2)}, ${childWorldPos.z.toFixed(2)}`;
-                if (childScaleEl) childScaleEl.innerText = `${childWorldScale.x.toFixed(2)}, ${childWorldScale.y.toFixed(2)}, ${childWorldScale.z.toFixed(2)}`;
-                if (childRotEl) childRotEl.innerText = `${THREE.MathUtils.radToDeg(childWorldEuler.x).toFixed(1)}°, ${THREE.MathUtils.radToDeg(childWorldEuler.y).toFixed(1)}°, ${THREE.MathUtils.radToDeg(childWorldEuler.z).toFixed(1)}°`;
+                if (childPosEl) childPosEl.innerText = `${scratchChildWorldPos.x.toFixed(2)}, ${scratchChildWorldPos.y.toFixed(2)}, ${scratchChildWorldPos.z.toFixed(2)}`;
+                if (childScaleEl) childScaleEl.innerText = `${scratchChildWorldScale.x.toFixed(2)}, ${scratchChildWorldScale.y.toFixed(2)}, ${scratchChildWorldScale.z.toFixed(2)}`;
+                if (childRotEl) childRotEl.innerText = `${THREE.MathUtils.radToDeg(scratchChildWorldEuler.x).toFixed(1)}°, ${THREE.MathUtils.radToDeg(scratchChildWorldEuler.y).toFixed(1)}°, ${THREE.MathUtils.radToDeg(scratchChildWorldEuler.z).toFixed(1)}°`;
             }
         }
     } catch (e) {
@@ -295,7 +342,13 @@ function updateChildCountUI() {
 async function setupWebcam() {
     video = document.getElementById('webcam');
     const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: VIDEO_WIDTH, height: VIDEO_HEIGHT }
+        video: {
+            width: { ideal: VIDEO_WIDTH },
+            height: { ideal: VIDEO_HEIGHT },
+            facingMode: 'user',
+            frameRate: IS_MOBILE ? { ideal: 15, max: 24 } : { ideal: 24, max: 30 }
+        },
+        audio: false
     });
     video.srcObject = stream;
     return new Promise((resolve) => {
@@ -310,9 +363,11 @@ function animate() {
     requestAnimationFrame(animate);
 
     // Process Webcam
-    if (faceLandmarker && video.currentTime !== lastVideoTime) {
+    const now = performance.now();
+    if (faceLandmarker && video && video.currentTime !== lastVideoTime && (now - lastFaceDetectionTime) >= FACE_DETECTION_INTERVAL_MS) {
         lastVideoTime = video.currentTime;
-        const results = faceLandmarker.detectForVideo(video, performance.now());
+        lastFaceDetectionTime = now;
+        const results = faceLandmarker.detectForVideo(video, now);
 
         if (results.faceLandmarks && results.faceLandmarks.length > 0) {
             const landmarks = results.faceLandmarks[ 0 ];
@@ -348,9 +403,6 @@ function animate() {
         cubeAnchor.rotation.y = THREE.MathUtils.lerp(cubeAnchor.rotation.y, clampedTargetY, 0.15);
         cubeAnchor.rotation.z = 0;
     }
-
-    // Neutralize child scale and update debug UI via helpers (keeps animate concise)
-    neutralizeChildScale();
 
     renderer.render(scene, camera);
 
